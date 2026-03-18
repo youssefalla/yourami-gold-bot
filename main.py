@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 import os
+import httpx
 
 app = Flask(__name__)
 
@@ -41,7 +42,7 @@ def webhook():
         })
 
     except Exception as e:
-        print(f"Webhook error: {e}")
+        print(f"Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 def get_ai(direction, price, sl, tp):
@@ -60,15 +61,8 @@ def get_ai(direction, price, sl, tp):
 
 def send_email(direction, price, sl, tp, analysis):
     try:
-        import smtplib
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
-
-        sender = os.environ.get("GMAIL_SENDER", "")
-        password = os.environ.get("GMAIL_PASS", "")
-        recipient = os.environ.get("ALERT_EMAIL", "")
-
-        print(f"Sending email to {recipient} from {sender}")
+        resend_key = os.environ.get("RESEND_KEY")
+        alert_email = os.environ.get("ALERT_EMAIL")
 
         subject = f"🎯 {direction} Signal | XAU/USD ${price:.2f}"
         body = f"""
@@ -85,21 +79,29 @@ Take Profit: ${tp}
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚠️ Max risk 1-2% per trade.
 """
-        msg = MIMEMultipart()
-        msg["From"] = sender
-        msg["To"] = recipient
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body, "plain"))
+        response = httpx.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {resend_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "from": "Yourami Gold Bot <onboarding@resend.dev>",
+                "to": [alert_email],
+                "subject": subject,
+                "text": body
+            },
+            timeout=30
+        )
 
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
-            s.login(sender, password)
-            s.sendmail(sender, recipient, msg.as_string())
-
-        print(f"✅ Email sent successfully!")
-        return "sent"
+        print(f"Resend response: {response.status_code} — {response.text}")
+        if response.status_code == 200 or response.status_code == 201:
+            return "sent ✅"
+        else:
+            return f"failed: {response.text}"
 
     except Exception as e:
-        print(f"❌ Email error: {e}")
+        print(f"Email error: {e}")
         return f"failed: {str(e)}"
 
 if __name__ == "__main__":
