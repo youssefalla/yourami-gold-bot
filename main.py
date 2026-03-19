@@ -8,58 +8,66 @@ app = Flask(__name__)
 def home():
     return jsonify({"status": "Yourami Gold Bot running 24/7 ✅"})
 
-@app.route("/webhook", methods=["POST"])
+@app.route("/webhook", methods=["POST", "GET"])
 def webhook():
     try:
-        data = request.get_json(force=True)
+        # Try JSON first
+        data = request.get_json(force=True, silent=True)
+        
+        # If not JSON, try form data or raw
         if not data:
-            return jsonify({"error": "No data"}), 400
+            raw = request.data.decode('utf-8')
+            print(f"Raw data received: {raw}")
+            # Try to parse manually
+            import json
+            try:
+                data = json.loads(raw)
+            except:
+                # TradingView sometimes sends plain text
+                data = {"direction": raw, "price": 0, "symbol": "XAUUSD", "time": "now"}
+
+        print(f"Data received: {data}")
 
         direction = str(data.get("direction", "")).upper()
-        price = float(data.get("price", 0))
-
+        price     = float(data.get("price", 0))
+        type_str  = str(data.get("type", ""))
+        
         if "BUY" in direction or "LONG" in direction:
             direction = "BUY"
         elif "SELL" in direction or "SHORT" in direction:
             direction = "SELL"
         else:
-            return jsonify({"error": "Unknown direction"}), 400
+            print(f"Unknown direction: {direction}")
+            return jsonify({"status": "received", "note": "no trade signal"}), 200
 
         atr = price * 0.004
-        sl = round(price - atr * 1.5 if direction == "BUY" else price + atr * 1.5, 2)
-        tp = round(price + atr * 3 if direction == "BUY" else price - atr * 3, 2)
+        sl  = round(price - atr * 1.5 if direction == "BUY" else price + atr * 1.5, 2)
+        tp  = round(price + atr * 3   if direction == "BUY" else price - atr * 3,   2)
 
-        analysis = get_ai(direction, price, sl, tp)
-        email_result = send_email(direction, price, sl, tp, analysis)
+        analysis     = get_ai(direction, price, sl, tp, type_str)
+        email_result = send_email(direction, price, sl, tp, analysis, type_str)
 
-        return jsonify({
-            "status": "ok",
-            "direction": direction,
-            "price": price,
-            "sl": sl,
-            "tp": tp,
-            "email": email_result
-        })
+        return jsonify({"status": "ok", "direction": direction, "price": price, "email": email_result})
 
     except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({"error": str(e)}), 500
+        print(f"Webhook error: {e}")
+        return jsonify({"status": "ok", "note": str(e)}), 200
 
-def get_ai(direction, price, sl, tp):
+def get_ai(direction, price, sl, tp, type_str):
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_KEY"))
         msg = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=300,
-            messages=[{"role": "user", "content": f"XAU/USD {direction} signal. Price: ${price:.2f}, SL: ${sl}, TP: ${tp}. Write 3 sentences: why valid, key levels, risk warning. Be direct."}]
+            messages=[{"role": "user", "content": f"XAU/USD {direction} signal ({type_str}). Price: ${price:.2f}, SL: ${sl}, TP: ${tp}. Write 3 sentences: why valid, key levels, risk warning. Be direct."}]
         )
         return msg.content[0].text
     except Exception as e:
         print(f"AI error: {e}")
         return f"{direction} XAU/USD ${price:.2f} | SL ${sl} | TP ${tp}"
 
-def send_email(direction, price, sl, tp, analysis):
+def send_email(direction, price, sl, tp, analysis, type_str):
     try:
         resend_key = os.environ.get("RESEND_KEY")
         alert_email = os.environ.get("ALERT_EMAIL")
@@ -69,7 +77,7 @@ def send_email(direction, price, sl, tp, analysis):
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 🔔 YOURAMI GOLD BOT
 ━━━━━━━━━━━━━━━━━━━━━━━━━
-Direction  : {direction}
+Direction  : {direction} ({type_str})
 Entry      : ${price:.2f}
 Stop Loss  : ${sl}
 Take Profit: ${tp}
@@ -93,13 +101,8 @@ Take Profit: ${tp}
             },
             timeout=30
         )
-
-        print(f"Resend response: {response.status_code} — {response.text}")
-        if response.status_code == 200 or response.status_code == 201:
-            return "sent ✅"
-        else:
-            return f"failed: {response.text}"
-
+        print(f"Email result: {response.status_code}")
+        return "sent ✅" if response.status_code in [200, 201] else f"failed: {response.text}"
     except Exception as e:
         print(f"Email error: {e}")
         return f"failed: {str(e)}"
