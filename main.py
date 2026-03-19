@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import os
 import httpx
+import json
 
 app = Flask(__name__)
 
@@ -13,17 +14,14 @@ def webhook():
     try:
         # Try JSON first
         data = request.get_json(force=True, silent=True)
-        
-        # If not JSON, try form data or raw
+
+        # If not JSON, try raw
         if not data:
             raw = request.data.decode('utf-8')
             print(f"Raw data received: {raw}")
-            # Try to parse manually
-            import json
             try:
                 data = json.loads(raw)
             except:
-                # TradingView sometimes sends plain text
                 data = {"direction": raw, "price": 0, "symbol": "XAUUSD", "time": "now"}
 
         print(f"Data received: {data}")
@@ -31,7 +29,9 @@ def webhook():
         direction = str(data.get("direction", "")).upper()
         price     = float(data.get("price", 0))
         type_str  = str(data.get("type", ""))
-        
+        rsi_val   = data.get("rsi", "N/A")
+        ict_val   = data.get("ict", "N/A")
+
         if "BUY" in direction or "LONG" in direction:
             direction = "BUY"
         elif "SELL" in direction or "SHORT" in direction:
@@ -40,52 +40,79 @@ def webhook():
             print(f"Unknown direction: {direction}")
             return jsonify({"status": "received", "note": "no trade signal"}), 200
 
-        atr = price * 0.004
-        sl  = round(price - atr * 1.5 if direction == "BUY" else price + atr * 1.5, 2)
-        tp  = round(price + atr * 3   if direction == "BUY" else price - atr * 3,   2)
+        # ── Use SL/TP from Pine Script if available ──
+        sl = float(data.get("sl", 0))
+        tp = float(data.get("tp", 0))
 
-        analysis     = get_ai(direction, price, sl, tp, type_str)
-        email_result = send_email(direction, price, sl, tp, analysis, type_str)
+        # Fallback ila Pine mabewsathomch
+        if sl == 0 or tp == 0:
+            atr = price * 0.004
+            sl  = round(price - atr * 1.5 if direction == "BUY" else price + atr * 1.5, 2)
+            tp  = round(price + atr * 3   if direction == "BUY" else price - atr * 3,   2)
 
-        return jsonify({"status": "ok", "direction": direction, "price": price, "email": email_result})
+        analysis     = get_ai(direction, price, sl, tp, type_str, rsi_val, ict_val)
+        email_result = send_email(direction, price, sl, tp, analysis, type_str, rsi_val, ict_val)
+
+        return jsonify({"status": "ok", "direction": direction, "price": price, "sl": sl, "tp": tp, "email": email_result})
 
     except Exception as e:
         print(f"Webhook error: {e}")
         return jsonify({"status": "ok", "note": str(e)}), 200
 
-def get_ai(direction, price, sl, tp, type_str):
+def get_ai(direction, price, sl, tp, type_str, rsi_val, ict_val):
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_KEY"))
         msg = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=300,
-            messages=[{"role": "user", "content": f"XAU/USD {direction} signal ({type_str}). Price: ${price:.2f}, SL: ${sl}, TP: ${tp}. Write 3 sentences: why valid, key levels, risk warning. Be direct."}]
+            max_tokens=350,
+            messages=[{"role": "user", "content": f"""XAU/USD {direction} signal detected:
+Type: {type_str}
+Price: ${price:.2f}
+Stop Loss: ${sl}
+Take Profit: ${tp}
+RSI: {rsi_val}
+ICT Confluence Score: {ict_val}/4
+
+Write 3 sentences:
+1) Why this setup is valid based on RSI and ICT score
+2) Key price levels to watch
+3) Risk warning
+
+Be direct and professional."""}]
         )
         return msg.content[0].text
     except Exception as e:
         print(f"AI error: {e}")
         return f"{direction} XAU/USD ${price:.2f} | SL ${sl} | TP ${tp}"
 
-def send_email(direction, price, sl, tp, analysis, type_str):
+def send_email(direction, price, sl, tp, analysis, type_str, rsi_val, ict_val):
     try:
-        resend_key = os.environ.get("RESEND_KEY")
+        resend_key  = os.environ.get("RESEND_KEY")
         alert_email = os.environ.get("ALERT_EMAIL")
+
+        rr = round(abs(tp - price) / abs(price - sl), 1) if abs(price - sl) > 0 else 0
 
         subject = f"🎯 {direction} Signal | XAU/USD ${price:.2f}"
         body = f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 🔔 YOURAMI GOLD BOT
 ━━━━━━━━━━━━━━━━━━━━━━━━━
-Direction  : {direction} ({type_str})
-Entry      : ${price:.2f}
-Stop Loss  : ${sl}
-Take Profit: ${tp}
+Direction   : {direction} ({type_str})
+Entry       : ${price:.2f}
+Stop Loss   : ${sl}
+Take Profit : ${tp}
+R:R Ratio   : 1:{rr}
+━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 SIGNAL DETAILS
+RSI         : {rsi_val}
+ICT Score   : {ict_val}/4
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 🤖 CLAUDE AI ANALYSIS
 {analysis}
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚠️ Max risk 1-2% per trade.
+Yourami Gold Bot — powered by Claude AI
 """
         response = httpx.post(
             "https://api.resend.com/emails",
